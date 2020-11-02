@@ -21,7 +21,10 @@
     unused_results
 )]
 
+
 use std::future::Future;
+
+pub use futures_lite::pin;
 
 pub mod fs;
 pub mod time;

@@ -1,18 +1,16 @@
-use std::fs;
-use std::io::{self, BufRead};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
+use std::io;
 
-use futures::io::{AsyncBufReadExt, BufReader};
-use futures::Stream;
+use futures::{Stream, StreamExt, TryStreamExt, io::BufReader, AsyncBufReadExt};
+use blocking::unblock;
 
-use crate::spawn_blocking;
+// Public re-exports
+pub use async_fs::{read, read_to_string, read_link, read_dir};
 
-pub async fn read_to_string<T>(path: T) -> io::Result<String>
-where
-    T: AsRef<Path> + Send + 'static,
-{
-    spawn_blocking(move || fs::read_to_string(path)).await
+pub async fn path_exists<T>(path: T) -> bool where T: AsRef<Path> + Send + 'static {
+    let path = path.as_ref().to_owned();
+    unblock(move || path.exists()).await
 }
 
 pub async fn read_into<T, R, E>(path: T) -> Result<R, E>
@@ -21,24 +19,20 @@ where
     R: FromStr + Send + 'static,
     E: From<io::Error> + From<<R as FromStr>::Err> + Send + 'static,
 {
-    spawn_blocking(|| {
-        let contents = fs::read_to_string(path)?;
+    let contents = read_to_string(path).await?;
 
-        R::from_str(&contents).map_err(Into::into)
-    })
-    .await
+    R::from_str(&contents).map_err(Into::into)
 }
 
 pub async fn read_lines<T>(path: T) -> io::Result<impl Stream<Item = io::Result<String>>>
 where
     T: AsRef<Path> + Send + 'static,
 {
-    let file = spawn_blocking(move || fs::File::open(path)).await?;
-
-    let stream = smol::reader(file);
-    let reader = BufReader::new(stream);
+    let file = async_fs::File::open(path).await?;
+    let reader = BufReader::new(file);
     Ok(reader.lines())
 }
+
 
 pub async fn read_lines_into<T, R, E>(path: T) -> io::Result<impl Stream<Item = Result<R, E>>>
 where
@@ -46,72 +40,23 @@ where
     R: FromStr + Send + 'static,
     E: From<io::Error> + From<<R as FromStr>::Err> + Send + 'static,
 {
-    let lines = spawn_blocking(move || {
-        let file = fs::File::open(path)?;
+    let stream = read_lines(path).await?;
+    let stream = stream
+        .map_err(E::from)
+            .and_then(|line| async move {
+            R::from_str(&line).map_err(E::from)
+        });
 
-        let reader = io::BufReader::new(file);
-        let lines = reader.lines();
-
-        Ok::<_, io::Error>(lines)
-    })
-    .await?;
-
-    let iter = lines.map(|try_line| match try_line {
-        Ok(line) => R::from_str(&line).map_err(E::from),
-        Err(e) => Err(E::from(e)),
-    });
-
-    Ok(smol::iter(iter))
-}
-
-pub async fn read<T>(path: T) -> io::Result<Vec<u8>>
-where
-    T: AsRef<Path> + Send + 'static,
-{
-    spawn_blocking(move || fs::read(path)).await
-}
-
-pub async fn read_link<T>(path: T) -> io::Result<PathBuf>
-where
-    T: AsRef<Path> + Send + 'static,
-{
-    spawn_blocking(move || fs::read_link(path)).await
-}
-
-pub async fn read_dir<T>(path: T) -> io::Result<impl Stream<Item = io::Result<fs::DirEntry>>>
-where
-    T: AsRef<Path> + Send + 'static,
-{
-    spawn_blocking(move || {
-        let entries = fs::read_dir(path)?;
-        // TODO: Might move iterator into another thread,
-        // would nice to continue execution on the same thread.
-        Ok(smol::iter(entries))
-    })
-    .await
-}
-
-pub async fn path_exists<T>(path: T) -> bool
-where
-    T: AsRef<Path> + Send + 'static,
-{
-    spawn_blocking(move || path.as_ref().exists()).await
+    Ok(stream)
 }
 
 pub async fn read_first_line<T>(path: T) -> io::Result<String>
 where
     T: AsRef<Path> + Send + 'static,
 {
-    spawn_blocking(|| {
-        let file = fs::File::open(path)?;
-        let reader = io::BufReader::new(file);
-        let mut lines = reader.lines();
-
-        match lines.next() {
-            Some(Ok(line)) => Ok(line),
-            Some(Err(e)) => Err(e),
-            None => Err(io::Error::from(io::ErrorKind::InvalidData)),
-        }
-    })
-    .await
+    match read_lines(path).await?.next().await {
+        Some(Ok(line)) => Ok(line),
+        Some(Err(e)) => Err(e.into()),
+        None => Err(io::Error::from(io::ErrorKind::InvalidData)),
+    }
 }
