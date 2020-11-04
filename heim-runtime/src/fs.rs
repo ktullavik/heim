@@ -1,14 +1,17 @@
+use std::io;
 use std::path::Path;
 use std::str::FromStr;
-use std::io;
 
-use futures::{Stream, StreamExt, TryStreamExt, io::BufReader, AsyncBufReadExt};
-use blocking::unblock;
+use futures::{io::BufReader, AsyncBufReadExt, Stream, StreamExt, TryStreamExt};
+use smol::unblock;
 
 // Public re-exports
-pub use async_fs::{read, read_to_string, read_link, read_dir};
+pub use smol::fs::{read, read_dir, read_link, read_to_string, File};
 
-pub async fn path_exists<T>(path: T) -> bool where T: AsRef<Path> + Send + 'static {
+pub async fn path_exists<T>(path: T) -> bool
+where
+    T: AsRef<Path> + Send + 'static,
+{
     let path = path.as_ref().to_owned();
     unblock(move || path.exists()).await
 }
@@ -28,11 +31,10 @@ pub async fn read_lines<T>(path: T) -> io::Result<impl Stream<Item = io::Result<
 where
     T: AsRef<Path> + Send + 'static,
 {
-    let file = async_fs::File::open(path).await?;
+    let file = File::open(path).await?;
     let reader = BufReader::new(file);
     Ok(reader.lines())
 }
-
 
 pub async fn read_lines_into<T, R, E>(path: T) -> io::Result<impl Stream<Item = Result<R, E>>>
 where
@@ -43,9 +45,7 @@ where
     let stream = read_lines(path).await?;
     let stream = stream
         .map_err(E::from)
-            .and_then(|line| async move {
-            R::from_str(&line).map_err(E::from)
-        });
+        .and_then(|line| async move { R::from_str(&line).map_err(E::from) });
 
     Ok(stream)
 }
@@ -56,7 +56,7 @@ where
 {
     match read_lines(path).await?.next().await {
         Some(Ok(line)) => Ok(line),
-        Some(Err(e)) => Err(e.into()),
+        Some(Err(e)) => Err(e),
         None => Err(io::Error::from(io::ErrorKind::InvalidData)),
     }
 }
